@@ -1,0 +1,10 @@
+{
+  "name": "com.seb.tachyon.common",
+  "version": "0.0.1",
+  "displayName": "Tachyon Common",
+  "unity": "2019.3",
+  "description": "Unity common integration for the Tachyon protocol.",
+  "dependencies": {
+    "com.seb.coroutiner": "0.0.1"
+  }
+}
