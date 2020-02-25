@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -7,53 +8,59 @@ using System.Text.RegularExpressions;
 using TachyonCommon;
 using UnityEditor;
 using UnityEditor.Compilation;
+using UnityEngine;
 using Assembly = System.Reflection.Assembly;
 using Debug = UnityEngine.Debug;
 
 [InitializeOnLoad]
-public static class TachyonDesignTimeBinder
-{
+public static class TachyonDesignTimeBinder {
     private static bool _bound = false;
-    static TachyonDesignTimeBinder()
-    {
-        
+    private static long _lastBuildTime;
+    
+    static TachyonDesignTimeBinder() {
+
         if (!_bound) {
             CompilationPipeline.assemblyCompilationStarted += OnAssemblyCompilationStarted;
+            _lastBuildTime = DateTime.Now.Ticks;
             _bound = true;
         }
-        
+
     }
 
-    private static void OnAssemblyCompilationStarted(string builtAssembly)
-    {
+    private static void OnAssemblyCompilationStarted(string builtAssembly) {
+        
+        if(!builtAssembly.Contains("Assembly-CSharp.dll")) return;
+        
         var fileInfo = new FileInfo(builtAssembly);
-        if(!fileInfo.Exists) return;
+        if (!fileInfo.Exists) return;
+
+        // Don't get caught in rebuild cycle after detecting own changes.
+        if(DateTime.Now.Ticks - _lastBuildTime < TimeSpan.FromSeconds(5).Ticks) return;
+        _lastBuildTime = DateTime.Now.Ticks;
 
         var assembly = Assembly.LoadFile(fileInfo.FullName);
         var interfaceTypes = assembly.GetTypes()
             .Where(t => t.IsInterface);
-        foreach (var foundType in interfaceTypes) { 
+        foreach (var foundType in interfaceTypes) {
             var isInterop = foundType
                 .GetCustomAttributes(false)
                 .Any(a => a is GenerateBindingsAttribute);
-            if (isInterop)
-            {
+            if (isInterop) {
                 var interopInterfaceFile =
                     FindScriptForInterface(foundType);
-                if(interopInterfaceFile == null)
+                if (interopInterfaceFile == null)
                     Debug.LogError("Interface " + interopInterfaceFile + " not found.");
                 else
                     UpdateTachyonBindings(interopInterfaceFile);
             }
         }
     }
-    
-    private static FileInfo FindScriptForInterface(Type interfaceType)
-    {
+
+    private static FileInfo FindScriptForInterface(Type interfaceType) {
         var assetScriptFiles = Directory.GetFiles(
             "Assets/",
-            "*.cs", 
-            SearchOption.AllDirectories );
+            "*.cs",
+            SearchOption.AllDirectories);
         var packageScriptFiles = Directory.GetFiles(
             "Packages/",
             "*.cs",
@@ -62,42 +69,65 @@ public static class TachyonDesignTimeBinder
             .Concat(packageScriptFiles);
 
         foreach (var script in scriptFiles) {
-            
+
             var code = File.ReadAllText(script);
-            var hasInterop =  code.Contains("[GenerateBindings]");
+            var hasInterop = code.Contains("[GenerateBindings]");
             var hasInterface = Regex.IsMatch(
-                code, 
+                code,
                 "interface\\s*" + interfaceType.Name
             );
 
-            if(hasInterop && hasInterface)
+            if (hasInterop && hasInterface)
                 return new FileInfo(script);
         }
 
         return null;
     }
 
-    private static void UpdateTachyonBindings(FileInfo interopInterfaceFile)
-    {
-        var binder = FindBinder();
-        if (binder == null) {
+    private static void UpdateTachyonBindings(FileInfo interopInterfaceFile) {
+        var binderFile = FindBinderExecFile();
+        if (binderFile == null) {
             Debug.LogError("Tachyon-Binder missing.");
         } else {
-            if (interopInterfaceFile.Directory?.FullName == null) return;
-            var interopInterfacePath = new DirectoryInfo(
-                interopInterfaceFile.Directory.FullName );
-            ProcessStart(
-                binder,
-                interopInterfaceFile, 
-                interopInterfacePath
-            );
+            foreach (ITachyonInstalledFlag flag in GetTachyonInstallFlags()) {
+                if (interopInterfaceFile.Directory?.FullName == null) return;
+                var interopInterfacePath = new DirectoryInfo(
+                    interopInterfaceFile.Directory.FullName);
+                ProcessStart(
+                    binderFile,
+                    interopInterfaceFile,
+                    interopInterfacePath,
+                    flag.ActivationArgument
+                );
+            }
         }
+    }
+
+    static ITachyonInstalledFlag[] GetTachyonInstallFlags() {
+        
+        var result = new List<ITachyonInstalledFlag>();
+        var aAppDomain = AppDomain.CurrentDomain;
+        var assemblies = aAppDomain.GetAssemblies()
+            .Where(a => a.FullName.Contains("Tachyon"));
+        foreach (var assembly in assemblies)
+        {
+            var types = assembly.GetTypes();
+            foreach (var type in types) {
+                if (typeof(ITachyonInstalledFlag).IsAssignableFrom(type) && !type.IsInterface) {
+                    var installFlag = Activator.CreateInstance(type) as ITachyonInstalledFlag;
+                    result.Add(installFlag);
+                }
+            }
+        }
+        
+        return result.ToArray();
     }
 
     private static void ProcessStart(
         FileInfo executableFile, 
         FileInfo interfaceFile, 
-        DirectoryInfo outputDirectory
+        DirectoryInfo outputDirectory,
+        string activationArg
     ) {
 
         var canRun = executableFile != null && interfaceFile != null && outputDirectory != null; 
@@ -136,7 +166,7 @@ public static class TachyonDesignTimeBinder
         startInfo.Arguments += outputDirectory.FullName;
         
         // Generate client binding.
-        startInfo.Arguments += " --host";
+        startInfo.Arguments += " " + activationArg;
         
         // Run binding generation process.
         var process = Process.Start(startInfo);
@@ -151,7 +181,7 @@ public static class TachyonDesignTimeBinder
 
     }
 
-    private static FileInfo FindBinder()
+    private static FileInfo FindBinderExecFile()
     {
 
         var execFileName = String.Empty;

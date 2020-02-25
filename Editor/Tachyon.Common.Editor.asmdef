@@ -1,6 +1,8 @@
 {
     "name": "Tachyon.Common.Editor",
-    "references": [],
+    "references": [
+        "Tachyon.Common"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [
         "Android",
